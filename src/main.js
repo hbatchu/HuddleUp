@@ -1,13 +1,39 @@
 import './style.css';
+import './animations.css';
 import { io } from 'socket.io-client';
 
 const state = {
   view: 'home', game: null, player: null, selected: null, joinedAt: 0,
-  answering: false, created: false, lastQuestionAt: 0
+  answering: false, created: false, lastQuestionAt: 0, answerDeadline: 0, timeLeft: 30, resumeToken: null
 };
 const socket = io();
 const $ = (selector) => document.querySelector(selector);
 const icons = ['▲', '◆', '●', '■'];
+const SESSION_KEY = 'huddleup-player-session';
+let timerInterval;
+
+function setGame(game) {
+  const enteredQuestion = state.game?.phase !== 'question' && game.phase === 'question';
+  state.game = game; state.answerDeadline = game.answerDeadline || 0;
+  if (state.player) state.player = game.players.find(player => player.id === state.player.id) || state.player;
+  if (enteredQuestion) { state.answering = false; state.selected = null; }
+  syncTimer();
+}
+function syncTimer() {
+  clearInterval(timerInterval);
+  if (state.game?.phase !== 'question' || !state.answerDeadline) return;
+  const tick = () => { const next = Math.max(0, Math.ceil((state.answerDeadline - Date.now()) / 1000)); if (next !== state.timeLeft) { state.timeLeft = next; render(); } };
+  tick(); timerInterval = setInterval(tick, 250);
+}
+function savedSession() { try { return JSON.parse(localStorage.getItem(SESSION_KEY)); } catch { return null; } }
+function saveSession() { localStorage.setItem(SESSION_KEY, JSON.stringify({ code: state.game.code, name: state.player.name, resumeToken: state.resumeToken })); }
+function resumeSession() {
+  const session = savedSession(); if (!session || state.created) return;
+  socket.emit('game:join', session, result => {
+    if (!result.ok) { localStorage.removeItem(SESSION_KEY); return; }
+    state.player = result.player; state.resumeToken = result.resumeToken; state.created = false; state.view = 'player-lobby'; setGame(result.game); render();
+  });
+}
 
 function createGame() {
   socket.emit('game:create', result => {
@@ -19,7 +45,7 @@ function createGame() {
 function joinGame(name, code) {
   socket.emit('game:join', { name, code }, result => {
     if (!result.ok) { $('#error').textContent = result.error; return; }
-    state.game = result.game; state.player = result.player; state.created = false; state.view = 'player-lobby'; render();
+    state.player = result.player; state.resumeToken = result.resumeToken; state.created = false; state.view = 'player-lobby'; setGame(result.game); saveSession(); render();
   });
 }
 
@@ -33,7 +59,7 @@ function nextQuestion() {
   socket.emit('game:next', { code: state.game.code });
 }
 function submitAnswer(choice) {
-  if (state.answering || state.game.phase !== 'question') return;
+  if (state.answering || state.game.phase !== 'question' || state.timeLeft <= 0) return;
   state.answering = true; state.selected = choice;
   socket.emit('answer:submit', { code: state.game.code, choice }, result => {
     if (!result.ok) { state.answering = false; state.selected = null; }
@@ -42,14 +68,12 @@ function submitAnswer(choice) {
   render();
 }
 
-socket.on('game:update', game => {
-  const newQuestion = state.game?.phase !== 'question' && game.phase === 'question';
-  state.game = game;
-  if (state.player) state.player = game.players.find(player => player.id === state.player.id) || state.player;
-  if (newQuestion) { state.answering = false; state.selected = null; }
-  render();
+socket.on('connect', resumeSession);
+socket.on('game:update', game => { setGame(game); render(); });
+socket.on('game:ended', () => { clearInterval(timerInterval); localStorage.removeItem(SESSION_KEY); state.view = 'home'; state.game = null; state.player = null; state.created = false; render(); });
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && state.game && !state.created) socket.emit('game:sync', { code: state.game.code }, result => { if (result?.ok) { setGame(result.game); render(); } });
 });
-socket.on('game:ended', () => { state.view = 'home'; state.game = null; state.player = null; state.created = false; render(); });
 
 function render() {
   const app = $('#app');
@@ -65,7 +89,7 @@ function home() { const pin = new URLSearchParams(location.search).get('pin') ||
 function host() {
   const g = state.game, q = g.questions?.[g.questionIndex], count = Object.keys(g.answers).length;
   if (g.phase === 'lobby') { const link = `${location.origin}/?pin=${g.code}`; return `<main class="room host-room"><header>${logo()}<span class="status"><i></i> LIVE ROOM</span></header><section class="lobby"><div class="pin-label">GAME PIN</div><div class="big-pin">${g.code}</div><p>Share the room link or have players enter the PIN.</p><button class="share-link" id="copy-link" data-link="${link}"><span>↗</span><b>${link.replace(/^https?:\/\//, '')}</b><em>Copy link</em></button><div class="people"><div class="avatars">${g.players.slice(0,6).map((p,i)=>`<i class="av a${i}">${p.name[0].toUpperCase()}</i>`).join('') || '<i class="av ghost">?</i>'}</div><b>${g.players.length} player${g.players.length === 1 ? '' : 's'} in the room</b></div><button class="primary massive" id="start" ${g.players.length ? '' : 'disabled'}>Start the game <span>→</span></button><small class="hint">${g.players.length ? 'Everyone is ready. Let’s go!' : 'Waiting for your first player…'}</small></section></main>`; }
-  if (g.phase === 'question') return `<main class="room host-room"><header>${logo()}<span class="round">QUESTION ${g.questionIndex + 1} / ${g.questionCount}</span></header><section class="host-question"><div class="q-meta"><span class="q-pill">LIVE QUESTION</span><span>${count} / ${g.players.length} ANSWERED</span></div><h2>${q.question}</h2><div class="answer-grid mini">${q.answers.map((a,i)=>`<div class="answer ${q.colors[i]}"><b>${icons[i]}</b>${a}</div>`).join('')}</div><button class="primary reveal" id="reveal">Reveal answers <span>→</span></button></section></main>`;
+  if (g.phase === 'question') return `<main class="room host-room"><header>${logo()}<span class="round">QUESTION ${g.questionIndex + 1} / ${g.questionCount}</span></header><section class="host-question"><div class="q-meta"><span class="q-pill">LIVE QUESTION</span><span class="answer-progress"><b>${count}</b> / ${g.players.length} ANSWERED <em>· ${Math.max(0, g.players.length - count)} ANSWERING</em></span></div><h2>${q.question}</h2><div class="answer-grid mini">${q.answers.map((a,i)=>`<div class="answer ${q.colors[i]}"><b>${icons[i]}</b>${a}</div>`).join('')}</div><button class="primary reveal" id="reveal">Reveal answers <span>→</span></button></section></main>`;
   return results(true);
 }
 function playerLobby() { return `<main class="room player-room"><header>${logo()}<span class="status"><i></i> CONNECTED</span></header><section class="waiting"><div class="waiting-icon">✦</div><div class="eyebrow">YOU’RE IN!</div><h2>Hey, ${state.player.name}.</h2><p>Get comfortable — the host will start the game any moment.</p><div class="game-chip"><span>HuddleUp Trivia</span><b>PIN ${state.game.code}</b></div><div class="pulse-row"><i></i><i></i><i></i></div></section></main>`; }
@@ -74,7 +98,7 @@ function playerGame() {
   if (g.phase === 'lobby') return playerLobby();
   if (g.phase === 'complete' || g.phase === 'leaderboard') return results(false);
   const q = g.questions?.[g.questionIndex];
-  return `<main class="room player-room"><header>${logo()}<span class="round">${g.questionIndex + 1} / ${g.questionCount}</span><span class="score">${state.player.score} pts</span></header><section class="question"><div class="timer"><span>${state.answering ? '✓' : '30'}</span></div><p class="question-count">QUESTION ${g.questionIndex + 1}</p><h2 class="phone-prompt">Choose the color<br>of the right answer</h2><div class="answer-grid player-answers">${q.answers.map((_,i)=>`<button aria-label="Choose ${q.colors[i]} option" class="answer ${q.colors[i]} ${state.selected === i ? 'picked' : ''}" data-answer="${i}" ${state.answering ? 'disabled' : ''}><b>${icons[i]}</b></button>`).join('')}</div>${state.answering ? `<p class="answered">Answer locked in — nice and quick!</p>` : '<p class="choose">Match the color on the host screen</p>'}</section></main>`;
+  return `<main class="room player-room"><header>${logo()}<span class="round">${g.questionIndex + 1} / ${g.questionCount}</span><span class="score">${state.player.score} pts</span></header><section class="question"><div class="timer ${state.timeLeft <= 5 ? 'urgent' : ''}"><span>${state.answering ? '✓' : state.timeLeft}</span></div><p class="question-count">QUESTION ${g.questionIndex + 1} · ${state.timeLeft ? 'ANSWER FAST' : 'TIME IS UP'}</p><h2 class="phone-prompt">Choose the color<br>of the right answer</h2><div class="answer-grid player-answers">${q.answers.map((_,i)=>`<button aria-label="Choose ${q.colors[i]} option" class="answer ${q.colors[i]} ${state.selected === i ? 'picked' : ''}" data-answer="${i}" ${state.answering || state.timeLeft <= 0 ? 'disabled' : ''}><b>${icons[i]}</b></button>`).join('')}</div>${state.answering ? `<p class="answered">Answer locked in — nice and quick!</p>` : state.timeLeft ? '<p class="choose">Match the color on the host screen</p>' : '<p class="choose">Waiting for the host to reveal the answer</p>'}</section></main>`;
 }
 function results(isHost) {
   const g = state.game, sorted = [...g.players].sort((a,b)=>b.score-a.score), done = g.phase === 'complete';
