@@ -14,6 +14,7 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: true } });
 const rooms = new Map();
+const ANSWER_COLORS = ['coral', 'aqua', 'violet', 'sun'];
 
 app.use(express.static(path.join(__dirname, 'dist')));
 app.get('/{*splat}', (_req, res) => res.sendFile(path.join(__dirname, 'dist', 'index.html')));
@@ -21,8 +22,15 @@ app.get('/{*splat}', (_req, res) => res.sendFile(path.join(__dirname, 'dist', 'i
 const makePin = () => String(Math.floor(100000 + Math.random() * 900000));
 function publicGame(room) {
   const { hostId, answerStartedAt, ...game } = room;
-  return { ...game, questionCount: QUESTIONS.length, questions: room.phase === 'question' ? QUESTIONS.map(({ correct, ...q }) => q) : undefined };
+  return {
+    ...game,
+    questionCount: QUESTIONS.length,
+    questions: room.phase === 'question'
+      ? QUESTIONS.map(({ correct, ...q }, index) => ({ ...q, colors: index === room.questionIndex ? room.optionColors : undefined }))
+      : undefined,
+  };
 }
+function shuffledColors() { return [...ANSWER_COLORS].sort(() => Math.random() - 0.5); }
 function sendGame(room) { io.to(room.code).emit('game:update', publicGame(room)); }
 
 io.on('connection', socket => {
@@ -44,7 +52,7 @@ io.on('connection', socket => {
   socket.on('game:start', ({ code }, ack) => {
     const room = rooms.get(String(code));
     if (!room || room.hostId !== socket.id) return ack?.({ ok: false });
-    room.phase = 'question'; room.answers = {}; room.answerStartedAt = Date.now(); sendGame(room); ack?.({ ok: true });
+    room.phase = 'question'; room.answers = {}; room.optionColors = shuffledColors(); room.answerStartedAt = Date.now(); sendGame(room); ack?.({ ok: true });
   });
 
   socket.on('answer:submit', ({ code, choice }, ack) => {
@@ -70,7 +78,7 @@ io.on('connection', socket => {
     const room = rooms.get(String(code));
     if (!room || room.hostId !== socket.id || room.phase !== 'leaderboard') return ack?.({ ok: false });
     if (room.questionIndex >= QUESTIONS.length - 1) room.phase = 'complete';
-    else { room.questionIndex += 1; room.phase = 'question'; room.answers = {}; room.answerStartedAt = Date.now(); }
+    else { room.questionIndex += 1; room.phase = 'question'; room.answers = {}; room.optionColors = shuffledColors(); room.answerStartedAt = Date.now(); }
     sendGame(room); ack?.({ ok: true });
   });
 

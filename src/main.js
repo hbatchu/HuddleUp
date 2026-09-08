@@ -55,7 +55,7 @@ function render() {
   const app = $('#app');
   if (state.view === 'home') app.innerHTML = home();
   else if (state.view === 'host') app.innerHTML = host();
-  else if (state.view === 'player-lobby') app.innerHTML = playerLobby();
+  else if (state.view === 'player-lobby' && state.game?.phase === 'lobby') app.innerHTML = playerLobby();
   else app.innerHTML = playerGame();
   bind();
 }
@@ -65,7 +65,7 @@ function home() { const pin = new URLSearchParams(location.search).get('pin') ||
 function host() {
   const g = state.game, q = g.questions?.[g.questionIndex], count = Object.keys(g.answers).length;
   if (g.phase === 'lobby') { const link = `${location.origin}/?pin=${g.code}`; return `<main class="room host-room"><header>${logo()}<span class="status"><i></i> LIVE ROOM</span></header><section class="lobby"><div class="pin-label">GAME PIN</div><div class="big-pin">${g.code}</div><p>Share the room link or have players enter the PIN.</p><button class="share-link" id="copy-link" data-link="${link}"><span>↗</span><b>${link.replace(/^https?:\/\//, '')}</b><em>Copy link</em></button><div class="people"><div class="avatars">${g.players.slice(0,6).map((p,i)=>`<i class="av a${i}">${p.name[0].toUpperCase()}</i>`).join('') || '<i class="av ghost">?</i>'}</div><b>${g.players.length} player${g.players.length === 1 ? '' : 's'} in the room</b></div><button class="primary massive" id="start" ${g.players.length ? '' : 'disabled'}>Start the game <span>→</span></button><small class="hint">${g.players.length ? 'Everyone is ready. Let’s go!' : 'Waiting for your first player…'}</small></section></main>`; }
-  if (g.phase === 'question') return `<main class="room host-room"><header>${logo()}<span class="round">QUESTION ${g.questionIndex + 1} / ${g.questionCount}</span></header><section class="host-question"><div class="q-meta"><span class="q-pill">${q.color.toUpperCase()} ROUND</span><span>${count} / ${g.players.length} ANSWERED</span></div><h2>${q.question}</h2><div class="answer-grid mini">${q.answers.map((a,i)=>`<div class="answer ${q.color}"><b>${icons[i]}</b>${a}</div>`).join('')}</div><button class="primary reveal" id="reveal">Reveal answers <span>→</span></button></section></main>`;
+  if (g.phase === 'question') return `<main class="room host-room"><header>${logo()}<span class="round">QUESTION ${g.questionIndex + 1} / ${g.questionCount}</span></header><section class="host-question"><div class="q-meta"><span class="q-pill">LIVE QUESTION</span><span>${count} / ${g.players.length} ANSWERED</span></div><h2>${q.question}</h2><div class="answer-grid mini">${q.answers.map((a,i)=>`<div class="answer ${q.colors[i]}"><b>${icons[i]}</b>${a}</div>`).join('')}</div><button class="primary reveal" id="reveal">Reveal answers <span>→</span></button></section></main>`;
   return results(true);
 }
 function playerLobby() { return `<main class="room player-room"><header>${logo()}<span class="status"><i></i> CONNECTED</span></header><section class="waiting"><div class="waiting-icon">✦</div><div class="eyebrow">YOU’RE IN!</div><h2>Hey, ${state.player.name}.</h2><p>Get comfortable — the host will start the game any moment.</p><div class="game-chip"><span>HuddleUp Trivia</span><b>PIN ${state.game.code}</b></div><div class="pulse-row"><i></i><i></i><i></i></div></section></main>`; }
@@ -74,7 +74,7 @@ function playerGame() {
   if (g.phase === 'lobby') return playerLobby();
   if (g.phase === 'complete' || g.phase === 'leaderboard') return results(false);
   const q = g.questions?.[g.questionIndex];
-  return `<main class="room player-room"><header>${logo()}<span class="round">${g.questionIndex + 1} / ${g.questionCount}</span><span class="score">${state.player.score} pts</span></header><section class="question"><div class="timer"><span>${state.answering ? '✓' : '30'}</span></div><p class="question-count">QUESTION ${g.questionIndex + 1}</p><h2>${q.question}</h2><div class="answer-grid">${q.answers.map((a,i)=>`<button class="answer ${['coral','aqua','violet','sun'][i]} ${state.selected === i ? 'picked' : ''}" data-answer="${i}" ${state.answering ? 'disabled' : ''}><b>${icons[i]}</b><span>${a}</span></button>`).join('')}</div>${state.answering ? `<p class="answered">Answer locked in — nice and quick!</p>` : '<p class="choose">Choose the answer that feels right</p>'}</section></main>`;
+  return `<main class="room player-room"><header>${logo()}<span class="round">${g.questionIndex + 1} / ${g.questionCount}</span><span class="score">${state.player.score} pts</span></header><section class="question"><div class="timer"><span>${state.answering ? '✓' : '30'}</span></div><p class="question-count">QUESTION ${g.questionIndex + 1}</p><h2 class="phone-prompt">Choose the color<br>of the right answer</h2><div class="answer-grid player-answers">${q.answers.map((_,i)=>`<button aria-label="Choose ${q.colors[i]} option" class="answer ${q.colors[i]} ${state.selected === i ? 'picked' : ''}" data-answer="${i}" ${state.answering ? 'disabled' : ''}><b>${icons[i]}</b></button>`).join('')}</div>${state.answering ? `<p class="answered">Answer locked in — nice and quick!</p>` : '<p class="choose">Match the color on the host screen</p>'}</section></main>`;
 }
 function results(isHost) {
   const g = state.game, sorted = [...g.players].sort((a,b)=>b.score-a.score), done = g.phase === 'complete';
