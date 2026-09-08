@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: huddleup-live-quiz
+    runtime: node
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /
