@@ -19,7 +19,13 @@ function setGame(game) {
   const enteredQuestion = state.game?.phase !== 'question' && game.phase === 'question';
   state.game = game; state.answerDeadline = game.answerDeadline || 0;
   if (state.player) state.player = game.players.find(player => player.id === state.player.id) || state.player;
-  if (enteredQuestion) { state.answering = false; state.selected = null; state.reactions = []; }
+  const submittedAnswer = state.player && game.answers?.[state.player.id];
+  if (submittedAnswer) {
+    state.answering = true;
+    state.selected = submittedAnswer.choice;
+  } else if (enteredQuestion) {
+    state.answering = false; state.selected = null; state.reactions = [];
+  }
   syncTimer();
 }
 function syncTimer() {
