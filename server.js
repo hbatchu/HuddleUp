@@ -62,6 +62,8 @@ const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: true } });
 const rooms = new Map();
 const ANSWER_COLORS = ['coral', 'aqua', 'violet', 'sun'];
+const REACTIONS = ['🔥', '😂', '🤯', '👏', '🎉', '🙌', '😮', '❤️'];
+const COMPLETED_ROOM_TTL_MS = 30 * 60 * 1000;
 
 app.use(express.static(path.join(__dirname, 'dist')));
 app.get('/{*splat}', (_req, res) => res.sendFile(path.join(__dirname, 'dist', 'index.html')));
@@ -72,7 +74,9 @@ function publicGame(room) {
   const { hostId, answerStartedAt, ...game } = room;
   return {
     ...game,
-    players: room.players.map(({ id, name, score, connected }) => ({ id, name, score, connected })),
+    players: room.players.map(({ id, name, score, connected, streak }) => ({
+      id, name, score, connected, streak: streak || 0, roundResult: room.roundResults?.[id] || null,
+    })),
     questionCount: roomQuestions(room).length,
     questions: room.phase === 'question'
       ? roomQuestions(room).map(({ correct, ...q }, index) => ({ ...q, colors: index === room.questionIndex ? room.optionColors : undefined }))
@@ -86,7 +90,7 @@ io.on('connection', socket => {
   socket.on('game:create', ({ category }, ack) => {
     if (!CATEGORIES[category]) return ack({ ok: false, error: 'Choose a quiz category.' });
     let code = makePin(); while (rooms.has(code)) code = makePin();
-    const room = { code, title: CATEGORIES[category].title, category, phase: 'lobby', questionIndex: 0, players: [], answers: {}, hostId: socket.id, answerStartedAt: 0, answerDeadline: 0 };
+    const room = { code, title: CATEGORIES[category].title, category, phase: 'lobby', questionIndex: 0, players: [], answers: {}, roundResults: {}, hostId: socket.id, answerStartedAt: 0, answerDeadline: 0 };
     rooms.set(code, room); socket.join(code); ack({ ok: true, game: publicGame(room) });
   });
 
@@ -97,7 +101,7 @@ io.on('connection', socket => {
     if (player) {
       player.socketId = socket.id; player.connected = true;
     } else {
-      player = { id: randomUUID(), socketId: socket.id, resumeToken: randomUUID(), name: String(name || 'Quizzer').trim().slice(0, 18) || 'Quizzer', score: 0, connected: true };
+      player = { id: randomUUID(), socketId: socket.id, resumeToken: randomUUID(), name: String(name || 'Quizzer').trim().slice(0, 18) || 'Quizzer', score: 0, streak: 0, connected: true };
       room.players.push(player);
     }
     socket.data.roomCode = room.code; socket.data.playerId = player.id; socket.data.isHost = false; socket.join(room.code);
@@ -107,7 +111,7 @@ io.on('connection', socket => {
   socket.on('game:start', ({ code }, ack) => {
     const room = rooms.get(String(code));
     if (!room || room.hostId !== socket.id) return ack?.({ ok: false });
-    room.phase = 'question'; room.answers = {}; room.optionColors = shuffledColors(); room.answerStartedAt = Date.now(); room.answerDeadline = room.answerStartedAt + 30000; sendGame(room); ack?.({ ok: true });
+    room.phase = 'question'; room.answers = {}; room.roundResults = {}; room.optionColors = shuffledColors(); room.answerStartedAt = Date.now(); room.answerDeadline = room.answerStartedAt + 30000; sendGame(room); ack?.({ ok: true });
   });
 
   socket.on('answer:submit', ({ code, choice }, ack) => {
@@ -119,13 +123,40 @@ io.on('connection', socket => {
     sendGame(room); ack?.({ ok: true });
   });
 
+  socket.on('reaction:send', ({ code, emoji }, ack) => {
+    const room = rooms.get(String(code));
+    const player = room?.players.find(p => p.id === socket.data.playerId);
+    if (!room || room.phase !== 'question' || !player || !REACTIONS.includes(emoji)) return ack?.({ ok: false });
+    const now = Date.now();
+    if (player.lastReactionAt && now - player.lastReactionAt < 700) return ack?.({ ok: false });
+    player.lastReactionAt = now;
+    io.to(room.code).emit('reaction:new', { id: `${player.id}-${now}`, emoji, name: player.name });
+    ack?.({ ok: true });
+  });
+
   socket.on('game:reveal', ({ code }, ack) => {
     const room = rooms.get(String(code));
     if (!room || room.hostId !== socket.id || room.phase !== 'question') return ack?.({ ok: false });
     const correct = roomQuestions(room)[room.questionIndex].correct;
-    Object.values(room.answers).forEach(answer => {
-      const player = room.players.find(p => p.id === answer.playerId);
-      if (player && answer.choice === correct) player.score += Math.max(250, Math.round(1000 - answer.elapsed * 18));
+    const previousRanks = new Map([...room.players].sort((a, b) => b.score - a.score).map((player, index) => [player.id, index + 1]));
+    room.roundResults = {};
+    room.players.forEach(player => {
+      const answer = room.answers[player.id];
+      const isCorrect = answer?.choice === correct;
+      const points = isCorrect ? Math.max(250, Math.round(1000 - answer.elapsed * 18)) : 0;
+      player.score += points;
+      player.streak = isCorrect ? (player.streak || 0) + 1 : 0;
+      room.roundResults[player.id] = { isCorrect, points, streak: player.streak, previousRank: previousRanks.get(player.id) };
+    });
+    const fastest = Object.values(room.answers)
+      .filter(answer => answer.choice === correct)
+      .sort((a, b) => a.elapsed - b.elapsed)[0];
+    if (fastest) room.roundResults[fastest.playerId].fastestCorrect = true;
+    const currentRanks = new Map([...room.players].sort((a, b) => b.score - a.score).map((player, index) => [player.id, index + 1]));
+    room.players.forEach(player => {
+      const result = room.roundResults[player.id];
+      result.rank = currentRanks.get(player.id);
+      result.rankChange = result.previousRank - result.rank;
     });
     room.phase = 'leaderboard'; sendGame(room); ack?.({ ok: true });
   });
@@ -133,8 +164,13 @@ io.on('connection', socket => {
   socket.on('game:next', ({ code }, ack) => {
     const room = rooms.get(String(code));
     if (!room || room.hostId !== socket.id || room.phase !== 'leaderboard') return ack?.({ ok: false });
-    if (room.questionIndex >= roomQuestions(room).length - 1) room.phase = 'complete';
-    else { room.questionIndex += 1; room.phase = 'question'; room.answers = {}; room.optionColors = shuffledColors(); room.answerStartedAt = Date.now(); room.answerDeadline = room.answerStartedAt + 30000; }
+    if (room.questionIndex >= roomQuestions(room).length - 1) {
+      room.phase = 'complete';
+      setTimeout(() => {
+        if (rooms.get(room.code) === room && room.phase === 'complete') rooms.delete(room.code);
+      }, COMPLETED_ROOM_TTL_MS);
+    }
+    else { room.questionIndex += 1; room.phase = 'question'; room.answers = {}; room.roundResults = {}; room.optionColors = shuffledColors(); room.answerStartedAt = Date.now(); room.answerDeadline = room.answerStartedAt + 30000; }
     sendGame(room); ack?.({ ok: true });
   });
 
