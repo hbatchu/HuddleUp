@@ -28,9 +28,10 @@ function getClient() {
     return null;
   }
   // NVIDIA's hosted catalog has been observed queuing 40-55s under shared
-  // load; cap it so a slow request degrades to the static bank instead of
-  // hanging the host indefinitely.
-  if (!client) client = new OpenAI({ apiKey: process.env.NVIDIA_API_KEY, baseURL: NVIDIA_BASE_URL, timeout: 60000 });
+  // load (and this varies run to run), so a 60s cap was cutting it too
+  // close and tripping the fallback on otherwise-successful requests.
+  // Wider margin here; the loading state on the client covers the wait.
+  if (!client) client = new OpenAI({ apiKey: process.env.NVIDIA_API_KEY, baseURL: NVIDIA_BASE_URL, timeout: 90000 });
   return client;
 }
 
