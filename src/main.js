@@ -9,7 +9,7 @@ import REACTIONS from '../shared/reactions.js';
 const state = {
   view: 'home', game: null, player: null, selected: null, joinedAt: 0,
   answering: false, created: false, lastQuestionAt: 0, answerDeadline: 0, timeLeft: 30, resumeToken: null, reactions: [],
-  hostToken: null, muted: false,
+  hostToken: null, muted: false, creatingGame: false,
 };
 const socket = io();
 const $ = (selector) => document.querySelector(selector);
@@ -116,9 +116,25 @@ function resumeSession() {
   resumePlayerSession();
 }
 
+function setBuilderBusy(busy) {
+  document.querySelectorAll('#quiz-rows input, #quiz-rows select, #quiz-title, #add-question, #back-category').forEach(el => { el.disabled = busy; });
+  const btn = $('#build-start'), label = $('#build-start-label');
+  if (btn) btn.disabled = busy;
+  if (label) label.textContent = busy ? 'Creating…' : 'Create & start game';
+}
 function createGame(category, custom) {
+  if (state.creatingGame) return;
+  state.creatingGame = true;
+  // Avoid a full render() while on the builder view — it would regenerate
+  // fresh empty question rows and wipe whatever the host already typed.
+  if (state.view === 'build') setBuilderBusy(true); else render();
   socket.emit('game:create', custom ? { custom } : { category }, result => {
-    if (!result.ok) { if (custom) { const err = $('#quiz-error'); if (err) err.textContent = result.error || 'Could not create that quiz.'; } return; }
+    state.creatingGame = false;
+    if (!result.ok) {
+      if (custom) { const err = $('#quiz-error'); if (err) err.textContent = result.error || 'Could not create that quiz.'; }
+      if (state.view === 'build') setBuilderBusy(false); else render();
+      return;
+    }
     state.game = result.game; state.created = true; state.player = null; state.hostToken = result.hostToken; saveHostSession(); state.view = 'host'; render();
   });
 }
@@ -188,7 +204,10 @@ function render() {
 
 function muteToggle() { return `<button type="button" class="mute-toggle" id="mute-toggle" aria-label="${state.muted ? 'Unmute sound' : 'Mute sound'}" aria-pressed="${state.muted}">${state.muted ? '🔇' : '🔊'}</button>`; }
 function logo() { return `<div class="brand-row"><a class="logo" href="#"><span class="logo-mark">✦</span> huddle<span>up</span></a>${muteToggle()}</div>`; }
-function categoryPicker() { return `<main class="room category-room"><header>${logo()}<button class="text-btn" id="back-home">← Back</button></header><section class="category-picker"><div class="eyebrow">CREATE A LIVE GAME</div><h2>Choose your quiz</h2><p>Ready-made sets built for an exciting crowd, or build your own from scratch.</p><div class="category-grid"><button class="category-card general" data-category="general"><span class="category-icon">◌</span><em>12 QUESTIONS · EASY → HARD</em><b>General<br>Knowledge</b><small>Ideas, science, economics, culture</small><strong>Start game →</strong></button><button class="category-card ai" data-category="ai"><span class="category-icon">✦</span><em>12 QUESTIONS · EASY → HARD</em><b>AI</b><small>LLMs, agents, data, and modern ML</small><strong>Start game →</strong></button><button class="category-card logos" data-category="logos"><span class="category-icon">◆</span><em>15 QUESTIONS · EASY → HARD</em><b>Logo<br>Quiz</b><small>Food, cars, tech, footwear &amp; more</small><strong>Start game →</strong></button><button class="category-card custom" id="build-own"><span class="category-icon">✎</span><em>YOUR QUESTIONS · ANY LENGTH</em><b>Build<br>your own</b><small>Write your own questions and answers</small><strong>Start building →</strong></button></div></section></main>`; }
+function categoryPicker() {
+  const busy = state.creatingGame;
+  return `<main class="room category-room"><header>${logo()}<button class="text-btn" id="back-home" ${busy ? 'disabled' : ''}>← Back</button></header><section class="category-picker"><div class="eyebrow">CREATE A LIVE GAME</div><h2>Choose your quiz</h2><p>Ready-made sets built for an exciting crowd, or build your own from scratch.</p>${busy ? '<div class="creating-status">✦ Generating fresh questions with AI…</div>' : ''}<div class="category-grid"><button class="category-card general" data-category="general" ${busy ? 'disabled' : ''}><span class="category-icon">◌</span><em>12 QUESTIONS · EASY → HARD</em><b>General<br>Knowledge</b><small>Ideas, science, economics, culture</small><strong>Start game →</strong></button><button class="category-card ai" data-category="ai" ${busy ? 'disabled' : ''}><span class="category-icon">✦</span><em>12 QUESTIONS · EASY → HARD</em><b>AI</b><small>LLMs, agents, data, and modern ML</small><strong>Start game →</strong></button><button class="category-card logos" data-category="logos" ${busy ? 'disabled' : ''}><span class="category-icon">◆</span><em>15 QUESTIONS · EASY → HARD</em><b>Logo<br>Quiz</b><small>Food, cars, tech, footwear &amp; more</small><strong>Start game →</strong></button><button class="category-card custom" id="build-own" ${busy ? 'disabled' : ''}><span class="category-icon">✎</span><em>YOUR QUESTIONS · ANY LENGTH</em><b>Build<br>your own</b><small>Write your own questions and answers</small><strong>Start building →</strong></button></div></section></main>`;
+}
 function home() { const pin = new URLSearchParams(location.search).get('pin') || ''; return `<main class="home"><nav>${logo()}<div class="nav-links"><a href="#how">How it works</a><a href="#play">For teams</a></div><button class="text-btn" id="host-link">Host a game <span>→</span></button></nav><section class="hero"><div class="eyebrow"><i></i> LIVE, TOGETHER</div><h1>Bring your<br><em>room</em> to life.</h1><p>HuddleUp turns everyday questions into a shared rush. Make a game, invite your people, and see who takes the crown.</p><div class="join-card"><div><label>YOUR NAME</label><input id="name" maxlength="18" placeholder="e.g. Maya" /></div><div><label>GAME PIN</label><input id="pin" maxlength="6" inputmode="numeric" value="${pin.replace(/\D/g, '').slice(0, 6)}" placeholder="6-digit code" /></div><button class="primary" id="join">Join now <span>→</span></button><small id="error"></small></div><div class="micro-copy"><span>✦ No downloads</span><span>◉ Live scoring</span><span>⌁ Up to 100 players</span></div><button class="host-cta" id="create"><span class="spark">✦</span><span><b>Host a new game</b><small>Start a free room in under a minute</small></span><strong>→</strong></button></section><aside class="game-preview"><div class="preview-top"><span><i></i> LIVE ROOM</span><b>24 players</b></div><p>Who is most likely to win a pop quiz?</p><div class="preview-options"><span>▲ Alex</span><span>◆ You</span><span>● Sam</span><span>■ Taylor</span></div><div class="preview-bottom"><div class="tiny-avatars"><i>J</i><i>M</i><i>R</i><i>+</i></div><b>Answers coming in…</b></div></aside><aside class="floating-card"><b>+12</b><span>joined just now</span></aside><div class="orb orb-one"></div><div class="orb orb-two"></div><div class="grid-glow"></div></main>`; }
 function durationPicker() { return `<div class="duration-picker"><span>Time per question</span><select id="duration" aria-label="Time per question">${DURATIONS.map(d => `<option value="${d}" ${d === 30 ? 'selected' : ''}>${d}s</option>`).join('')}</select></div>`; }
 function host() {
@@ -236,7 +255,7 @@ function quizRowTemplate() {
 function renumberRows() { document.querySelectorAll('.quiz-row .row-num').forEach((el, i) => { el.textContent = `Question ${i + 1}`; }); }
 function quizBuilder() {
   const startRows = Array.from({ length: 3 }, quizRowTemplate).join('');
-  return `<main class="room category-room"><header>${logo()}<button class="text-btn" id="back-category">← Back</button></header><section class="category-picker quiz-builder"><div class="eyebrow">BUILD YOUR OWN</div><h2>Create a quiz</h2><p>Add your questions, mark the correct answer, then start the game.</p><input type="text" id="quiz-title" class="quiz-title-input" maxlength="40" placeholder="Quiz title (optional)" /><div id="quiz-rows">${startRows}</div><button type="button" class="text-btn add-row" id="add-question">+ Add question</button><small id="quiz-error"></small><button class="primary massive" id="build-start">Create &amp; start game <span>→</span></button></section></main>`;
+  return `<main class="room category-room"><header>${logo()}<button class="text-btn" id="back-category">← Back</button></header><section class="category-picker quiz-builder"><div class="eyebrow">BUILD YOUR OWN</div><h2>Create a quiz</h2><p>Add your questions, mark the correct answer, then start the game.</p><input type="text" id="quiz-title" class="quiz-title-input" maxlength="40" placeholder="Quiz title (optional)" /><div id="quiz-rows">${startRows}</div><button type="button" class="text-btn add-row" id="add-question">+ Add question</button><small id="quiz-error"></small><button class="primary massive" id="build-start"><b id="build-start-label">Create &amp; start game</b> <span>→</span></button></section></main>`;
 }
 function readCustomQuiz() {
   const rows = document.querySelectorAll('.quiz-row');

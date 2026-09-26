@@ -1,9 +1,12 @@
+require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const path = require('path');
 const { randomUUID } = require('crypto');
 const { Server } = require('socket.io');
 const REACTIONS = require('./shared/reactions');
+const { generateQuestions } = require('./questionGenerator');
+const GENERATED_CATEGORIES = new Set(['general', 'ai']);
 
 const CATEGORIES = {
   general: { title: 'General Knowledge', questions: [
@@ -57,35 +60,35 @@ const CATEGORIES = {
   { level: 'Hard', question: 'What is the major shift from chatbots to agentic AI?', answers: ['From answering to executing', 'From text to email', 'From cloud to desktop', 'From AI to robotics'], correct: 0 }
 ] },
   logos: { title: 'Logo Quiz', questions: [
-  { level: 'Easy', question: 'Which brand does this logo belong to?', image: 'https://cdn.simpleicons.org/apple', answers: ['Apple', 'Samsung', 'Microsoft', 'Sony'], correct: 0 },
+  { level: 'Easy', question: 'Which brand does this logo belong to?', image: 'https://cdn.simpleicons.org/puma', answers: ['Puma', 'Adidas', 'Under Armour', 'New Balance'], correct: 0 },
 
-  { level: 'Easy', question: 'Which brand does this logo belong to?', image: 'https://cdn.simpleicons.org/nike', answers: ['Puma', 'Nike', 'Adidas', 'Reebok'], correct: 1 },
+  { level: 'Easy', question: 'Which brand does this logo belong to?', image: 'https://cdn.simpleicons.org/bmw', answers: ['BMW', 'Audi', 'Volvo', 'Bentley'], correct: 0 },
 
-  { level: 'Easy', question: 'Which brand does this logo belong to?', image: 'https://cdn.simpleicons.org/mcdonalds', answers: ["McDonald's", 'Burger King', 'KFC', 'Subway'], correct: 0 },
+  { level: 'Easy', question: 'Which brand does this logo belong to?', image: 'https://cdn.simpleicons.org/toyota', answers: ['Toyota', 'Honda', 'Mazda', 'Suzuki'], correct: 0 },
 
-  { level: 'Easy', question: 'Which brand does this logo belong to?', image: 'https://cdn.simpleicons.org/google', answers: ['Microsoft', 'Yahoo', 'Google', 'Amazon'], correct: 2 },
+  { level: 'Easy', question: 'Which brand does this logo belong to?', image: 'https://cdn.simpleicons.org/samsung', answers: ['Samsung', 'LG', 'Sony', 'Panasonic'], correct: 0 },
 
-  { level: 'Easy', question: 'Which brand does this logo belong to?', image: 'https://cdn.simpleicons.org/cocacola', answers: ['Pepsi', 'Fanta', 'Coca-Cola', 'Sprite'], correct: 2 },
+  { level: 'Easy', question: 'Which brand does this logo belong to?', image: 'https://cdn.simpleicons.org/spotify', answers: ['Spotify', 'Tidal', 'Deezer', 'SoundCloud'], correct: 0 },
 
-  { level: 'Medium', question: 'Which brand does this logo belong to?', image: 'https://cdn.simpleicons.org/bmw', answers: ['Audi', 'BMW', 'Mercedes-Benz', 'Volkswagen'], correct: 1 },
+  { level: 'Medium', question: 'Which brand does this logo belong to?', image: 'https://cdn.simpleicons.org/ferrari', answers: ['Ferrari', 'Lamborghini', 'Maserati', 'Porsche'], correct: 0 },
 
-  { level: 'Medium', question: 'Which brand does this logo belong to?', image: 'https://cdn.simpleicons.org/samsung', answers: ['Samsung', 'LG', 'Sony', 'Panasonic'], correct: 0 },
+  { level: 'Medium', question: 'Which brand does this logo belong to?', image: 'https://cdn.simpleicons.org/dell', answers: ['HP', 'Lenovo', 'Dell', 'Acer'], correct: 2 },
 
-  { level: 'Medium', question: 'Which brand does this logo belong to?', image: 'https://cdn.simpleicons.org/adidas', answers: ['Puma', 'Under Armour', 'Reebok', 'Adidas'], correct: 3 },
+  { level: 'Medium', question: 'Which brand does this logo belong to?', image: 'https://cdn.simpleicons.org/discord', answers: ['Telegram', 'WhatsApp', 'Discord', 'Meta'], correct: 2 },
 
-  { level: 'Medium', question: 'Which brand does this logo belong to?', image: 'https://cdn.simpleicons.org/starbucks', answers: ['Costa Coffee', 'Starbucks', 'Dunkin', "Peet's Coffee"], correct: 1 },
+  { level: 'Medium', question: 'Which brand does this logo belong to?', image: 'https://cdn.simpleicons.org/fedex', answers: ['UPS', 'DHL', 'Uber', 'FedEx'], correct: 3 },
 
-  { level: 'Medium', question: 'Which brand does this logo belong to?', image: 'https://cdn.simpleicons.org/porsche', answers: ['Porsche', 'Ferrari', 'Lamborghini', 'Bentley'], correct: 0 },
+  { level: 'Medium', question: 'Which brand does this logo belong to?', image: 'https://cdn.simpleicons.org/airbnb', answers: ['Uber', 'Lyft', 'Airbnb', 'DHL'], correct: 2 },
 
-  { level: 'Hard', question: 'Which brand does this logo belong to?', image: 'https://cdn.simpleicons.org/tesla', answers: ['Rivian', 'Lucid', 'Tesla', 'Polestar'], correct: 2 },
+  { level: 'Hard', question: 'Which brand does this logo belong to?', image: 'https://cdn.simpleicons.org/xiaomi', answers: ['OnePlus', 'Oppo', 'Xiaomi', 'Vivo'], correct: 2 },
 
-  { level: 'Hard', question: 'Which brand does this logo belong to?', image: 'https://cdn.simpleicons.org/toyota', answers: ['Honda', 'Toyota', 'Nissan', 'Mazda'], correct: 1 },
+  { level: 'Hard', question: 'Which brand does this logo belong to?', image: 'https://cdn.simpleicons.org/razer', answers: ['Asus', 'MSI', 'Razer', 'Acer'], correct: 2 },
 
-  { level: 'Hard', question: 'Which brand does this logo belong to?', image: 'https://cdn.simpleicons.org/puma', answers: ['Puma', 'Reebok', 'New Balance', 'Under Armour'], correct: 0 },
+  { level: 'Hard', question: 'Which brand does this logo belong to?', image: 'https://cdn.simpleicons.org/peugeot', answers: ['Renault', 'Citroën', 'Audi', 'Peugeot'], correct: 3 },
 
-  { level: 'Hard', question: 'Which brand does this logo belong to?', image: 'https://cdn.simpleicons.org/spotify', answers: ['Apple Music', 'SoundCloud', 'Spotify', 'Tidal'], correct: 2 },
+  { level: 'Hard', question: 'Which brand does this logo belong to?', image: 'https://cdn.simpleicons.org/fila', answers: ['Under Armour', 'New Balance', 'Fila', 'Puma'], correct: 2 },
 
-  { level: 'Hard', question: 'Which brand does this logo belong to?', image: 'https://cdn.simpleicons.org/netflix', answers: ['Hulu', 'Netflix', 'Disney+', 'HBO Max'], correct: 1 }
+  { level: 'Hard', question: 'Which brand does this logo belong to?', image: 'https://cdn.simpleicons.org/ikea', answers: ['IKEA', 'Meta', 'Shell', 'Red Bull'], correct: 0 }
 ] },
 };
 
@@ -154,7 +157,7 @@ function sendGame(room) {
 }
 
 io.on('connection', socket => {
-  socket.on('game:create', ({ category, custom }, ack) => {
+  socket.on('game:create', async ({ category, custom }, ack) => {
     let title, categoryKey = null, customQuestions = null;
     if (custom) {
       customQuestions = validateCustomQuestions(custom.questions);
@@ -163,6 +166,10 @@ io.on('connection', socket => {
     } else {
       if (!CATEGORIES[category]) return ack({ ok: false, error: 'Choose a quiz category.' });
       categoryKey = category; title = CATEGORIES[category].title;
+      if (GENERATED_CATEGORIES.has(category)) {
+        const generated = await generateQuestions(category, CATEGORIES[category].questions.length);
+        if (generated) customQuestions = generated;
+      }
     }
     let code = makePin(); while (rooms.has(code)) code = makePin();
     const hostToken = randomUUID();
