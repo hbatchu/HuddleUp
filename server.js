@@ -3,6 +3,7 @@ const http = require('http');
 const path = require('path');
 const { randomUUID } = require('crypto');
 const { Server } = require('socket.io');
+const REACTIONS = require('./shared/reactions');
 
 const CATEGORIES = {
   general: { title: 'General Knowledge', questions: [
@@ -62,36 +63,95 @@ const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: true } });
 const rooms = new Map();
 const ANSWER_COLORS = ['coral', 'aqua', 'violet', 'sun'];
-const REACTIONS = ['🔥', '😂', '🤯', '👏', '🎉', '🙌', '😮', '❤️'];
 const COMPLETED_ROOM_TTL_MS = 30 * 60 * 1000;
+const HOST_RECONNECT_GRACE_MS = 2 * 60 * 1000;
+const ALLOWED_DURATIONS = [10, 15, 20, 30, 45, 60];
+const LEVELS = ['Easy', 'Medium', 'Hard'];
 
 app.use(express.static(path.join(__dirname, 'dist')));
 app.get('/{*splat}', (_req, res) => res.sendFile(path.join(__dirname, 'dist', 'index.html')));
 
 const makePin = () => String(Math.floor(100000 + Math.random() * 900000));
-const roomQuestions = room => CATEGORIES[room.category].questions;
-function publicGame(room) {
-  const { hostId, answerStartedAt, ...game } = room;
+const roomQuestions = room => room.customQuestions || CATEGORIES[room.category].questions;
+
+function validateCustomQuestions(questions) {
+  if (!Array.isArray(questions) || questions.length < 1 || questions.length > 50) return null;
+  const clean = [];
+  for (const q of questions) {
+    if (!q || typeof q.question !== 'string' || !q.question.trim()) return null;
+    if (!Array.isArray(q.answers) || q.answers.length !== 4 || q.answers.some(a => typeof a !== 'string' || !a.trim())) return null;
+    const correct = Number(q.correct);
+    if (!Number.isInteger(correct) || correct < 0 || correct > 3) return null;
+    clean.push({
+      level: LEVELS.includes(q.level) ? q.level : 'Custom',
+      question: q.question.trim().slice(0, 200),
+      answers: q.answers.map(a => String(a).trim().slice(0, 80)),
+      correct,
+    });
+  }
+  return clean;
+}
+
+function currentQuestionPayload(room) {
+  if (room.phase !== 'question' && room.phase !== 'leaderboard') return undefined;
+  const q = roomQuestions(room)[room.questionIndex];
+  if (room.phase === 'question') { const { correct, ...rest } = q; return { ...rest, colors: room.optionColors }; }
+  return { ...q, colors: room.optionColors };
+}
+
+function publicGame(room, viewerId) {
+  const { hostId, hostToken, hostDisconnectTimer, answerStartedAt, answers, customQuestions, ...game } = room;
   return {
     ...game,
     players: room.players.map(({ id, name, score, connected, streak }) => ({
       id, name, score, connected, streak: streak || 0, roundResult: room.roundResults?.[id] || null,
     })),
     questionCount: roomQuestions(room).length,
-    questions: room.phase === 'question'
-      ? roomQuestions(room).map(({ correct, ...q }, index) => ({ ...q, colors: index === room.questionIndex ? room.optionColors : undefined }))
-      : undefined,
+    answerCount: Object.keys(answers).length,
+    myAnswer: viewerId ? (answers[viewerId] || null) : null,
+    question: currentQuestionPayload(room),
   };
 }
 function shuffledColors() { return [...ANSWER_COLORS].sort(() => Math.random() - 0.5); }
-function sendGame(room) { io.to(room.code).emit('game:update', publicGame(room)); }
+function sendGame(room) {
+  const hostSocket = io.sockets.sockets.get(room.hostId);
+  hostSocket?.emit('game:update', publicGame(room));
+  room.players.forEach(player => {
+    const playerSocket = io.sockets.sockets.get(player.socketId);
+    playerSocket?.emit('game:update', publicGame(room, player.id));
+  });
+}
 
 io.on('connection', socket => {
-  socket.on('game:create', ({ category }, ack) => {
-    if (!CATEGORIES[category]) return ack({ ok: false, error: 'Choose a quiz category.' });
+  socket.on('game:create', ({ category, custom }, ack) => {
+    let title, categoryKey = null, customQuestions = null;
+    if (custom) {
+      customQuestions = validateCustomQuestions(custom.questions);
+      if (!customQuestions) return ack({ ok: false, error: 'Add at least one question with 4 filled-in answers.' });
+      title = String(custom.title || 'Custom Quiz').trim().slice(0, 40) || 'Custom Quiz';
+    } else {
+      if (!CATEGORIES[category]) return ack({ ok: false, error: 'Choose a quiz category.' });
+      categoryKey = category; title = CATEGORIES[category].title;
+    }
     let code = makePin(); while (rooms.has(code)) code = makePin();
-    const room = { code, title: CATEGORIES[category].title, category, phase: 'lobby', questionIndex: 0, players: [], answers: {}, roundResults: {}, hostId: socket.id, answerStartedAt: 0, answerDeadline: 0 };
-    rooms.set(code, room); socket.join(code); ack({ ok: true, game: publicGame(room) });
+    const hostToken = randomUUID();
+    const room = {
+      code, title, category: categoryKey, customQuestions, phase: 'lobby', questionIndex: 0, players: [], answers: {}, roundResults: {},
+      hostId: socket.id, hostToken, hostConnected: true, hostDisconnectTimer: null,
+      questionDuration: 30000, answerStartedAt: 0, answerDeadline: 0,
+    };
+    rooms.set(code, room); socket.data.roomCode = room.code; socket.data.isHost = true; socket.join(code);
+    ack({ ok: true, game: publicGame(room), hostToken });
+  });
+
+  socket.on('host:resume', ({ code, hostToken }, ack) => {
+    const room = rooms.get(String(code));
+    if (!room || !hostToken || room.hostToken !== hostToken) return ack?.({ ok: false });
+    clearTimeout(room.hostDisconnectTimer); room.hostDisconnectTimer = null;
+    room.hostId = socket.id; room.hostConnected = true;
+    socket.data.roomCode = room.code; socket.data.isHost = true; socket.join(room.code);
+    ack?.({ ok: true, game: publicGame(room), hostToken: room.hostToken });
+    sendGame(room);
   });
 
   socket.on('game:join', ({ code, name, resumeToken }, ack) => {
@@ -105,13 +165,15 @@ io.on('connection', socket => {
       room.players.push(player);
     }
     socket.data.roomCode = room.code; socket.data.playerId = player.id; socket.data.isHost = false; socket.join(room.code);
-    ack({ ok: true, game: publicGame(room), player: { id: player.id, name: player.name, score: player.score, connected: true }, resumeToken: player.resumeToken }); sendGame(room);
+    ack({ ok: true, game: publicGame(room, player.id), player: { id: player.id, name: player.name, score: player.score, connected: true }, resumeToken: player.resumeToken }); sendGame(room);
   });
 
-  socket.on('game:start', ({ code }, ack) => {
+  socket.on('game:start', ({ code, duration }, ack) => {
     const room = rooms.get(String(code));
     if (!room || room.hostId !== socket.id) return ack?.({ ok: false });
-    room.phase = 'question'; room.answers = {}; room.roundResults = {}; room.optionColors = shuffledColors(); room.answerStartedAt = Date.now(); room.answerDeadline = room.answerStartedAt + 30000; sendGame(room); ack?.({ ok: true });
+    const seconds = ALLOWED_DURATIONS.includes(Number(duration)) ? Number(duration) : 30;
+    room.questionDuration = seconds * 1000;
+    room.phase = 'question'; room.answers = {}; room.roundResults = {}; room.optionColors = shuffledColors(); room.answerStartedAt = Date.now(); room.answerDeadline = room.answerStartedAt + room.questionDuration; sendGame(room); ack?.({ ok: true });
   });
 
   socket.on('answer:submit', ({ code, choice }, ack) => {
@@ -170,21 +232,27 @@ io.on('connection', socket => {
         if (rooms.get(room.code) === room && room.phase === 'complete') rooms.delete(room.code);
       }, COMPLETED_ROOM_TTL_MS);
     }
-    else { room.questionIndex += 1; room.phase = 'question'; room.answers = {}; room.roundResults = {}; room.optionColors = shuffledColors(); room.answerStartedAt = Date.now(); room.answerDeadline = room.answerStartedAt + 30000; }
+    else { room.questionIndex += 1; room.phase = 'question'; room.answers = {}; room.roundResults = {}; room.optionColors = shuffledColors(); room.answerStartedAt = Date.now(); room.answerDeadline = room.answerStartedAt + room.questionDuration; }
     sendGame(room); ack?.({ ok: true });
   });
 
   socket.on('game:sync', ({ code }, ack) => {
     const room = rooms.get(String(code));
-    if (room && socket.data.roomCode === room.code) ack?.({ ok: true, game: publicGame(room) });
+    if (room && socket.data.roomCode === room.code) ack?.({ ok: true, game: publicGame(room, socket.data.playerId) });
   });
 
   socket.on('disconnect', () => {
-    for (const room of rooms.values()) {
-      if (room.hostId === socket.id) { io.to(room.code).emit('game:ended'); rooms.delete(room.code); break; }
-      const player = room.players.find(p => p.id === socket.data.playerId);
-      if (player) { player.connected = false; sendGame(room); }
+    const room = rooms.get(socket.data.roomCode);
+    if (!room) return;
+    if (socket.data.isHost && room.hostId === socket.id) {
+      room.hostConnected = false;
+      room.hostDisconnectTimer = setTimeout(() => {
+        if (rooms.get(room.code) === room && !room.hostConnected) { io.to(room.code).emit('game:ended'); rooms.delete(room.code); }
+      }, HOST_RECONNECT_GRACE_MS);
+      return;
     }
+    const player = room.players.find(p => p.id === socket.data.playerId);
+    if (player) { player.connected = false; sendGame(room); }
   });
 });
 
