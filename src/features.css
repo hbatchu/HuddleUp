@@ -11,6 +11,7 @@
 .join-qr{width:96px;height:96px;padding:8px;background:#fff;border:1px solid var(--line);border-radius:14px;box-shadow:0 8px 17px #3326531a}
 
 .category-card.custom{background:linear-gradient(135deg,#3a3450,#5c5470);color:#fff}
+.category-card.logos{background:linear-gradient(135deg,#1c1f2b,#3d4457);color:#fff}
 
 .quiz-builder{max-width:640px;text-align:left}
 .quiz-builder h2,.quiz-builder>p{text-align:center}
