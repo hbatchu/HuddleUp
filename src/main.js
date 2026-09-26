@@ -159,31 +159,90 @@ function nextQuestion() {
 function submitAnswer(choice) {
   if (state.answering || state.game.phase !== 'question' || state.timeLeft <= 0) return;
   state.answering = true; state.selected = choice;
-  socket.emit('answer:submit', { code: state.game.code, choice }, result => {
-    if (!result.ok) { state.answering = false; state.selected = null; }
-    render();
-  });
   render();
+  socket.emit('answer:submit', { code: state.game.code, choice }, result => {
+    if (!result.ok) { state.answering = false; state.selected = null; render(); }
+  });
 }
 function sendReaction(emoji) {
   if (state.game?.phase !== 'question') return;
   socket.emit('reaction:send', { code: state.game.code, emoji });
 }
+function reactionPopHtml(reaction) {
+  return `<span class="reaction-pop" data-reaction-id="${reaction.id}" title="${safeText(reaction.name)} reacted">${reaction.emoji}</span>`;
+}
 function reactionShelf(showControls = true) {
   const recent = state.reactions.slice(-6);
-  return `<div class="reaction-area"><div class="reaction-feed" aria-live="polite">${recent.map(reaction => `<span class="reaction-pop" title="${safeText(reaction.name)} reacted">${reaction.emoji}</span>`).join('')}</div>${showControls ? `<div class="reaction-bar" aria-label="Send a reaction">${REACTIONS.map(emoji => `<button class="reaction-button" data-reaction="${emoji}" aria-label="React ${emoji}">${emoji}</button>`).join('')}</div>` : ''}</div>`;
+  return `<div class="reaction-area"><div class="reaction-feed" aria-live="polite">${recent.map(reactionPopHtml).join('')}</div>${showControls ? `<div class="reaction-bar" aria-label="Send a reaction">${REACTIONS.map(emoji => `<button class="reaction-button" data-reaction="${emoji}" aria-label="React ${emoji}">${emoji}</button>`).join('')}</div>` : ''}</div>`;
 }
 function hostWarning(g) { return g.hostConnected === false ? `<div class="host-warning">⚠ Host disconnected — hang tight, they may reconnect any moment.</div>` : ''; }
 
+// Patch the live DOM in place for noisy, frequent updates (every player
+// submitting an answer, players joining the lobby) instead of a full
+// render() — a full re-render tears down and recreates every node, which
+// replays entrance animations and reads as flicker during live play. Any
+// case this doesn't explicitly handle safely falls through to a full
+// render(), so correctness never depends on this optimization.
+function patchLiveUpdate(previous, game) {
+  if (!previous || previous.phase !== game.phase || previous.questionIndex !== game.questionIndex) return false;
+  if (previous.hostConnected !== game.hostConnected) return false;
+  if (game.phase === 'question') {
+    if (state.created) return patchAnswerProgress(game);
+    return JSON.stringify(previous.myAnswer) === JSON.stringify(game.myAnswer);
+  }
+  if (game.phase === 'lobby' && state.created) return patchPlayerList(previous, game);
+  return false;
+}
+function patchAnswerProgress(game) {
+  const answered = $('.answered-count'), total = $('.total-count'), left = $('.answering-left');
+  if (!answered || !total || !left) return false;
+  answered.textContent = game.answerCount;
+  total.textContent = game.players.length;
+  left.textContent = `· ${Math.max(0, game.players.length - game.answerCount)} ANSWERING`;
+  return true;
+}
+function patchPlayerList(previous, game) {
+  const list = $('.player-list');
+  if (!list) return false;
+  const prevPlayers = previous.players, nextPlayers = game.players;
+  const appendOnly = nextPlayers.length >= prevPlayers.length
+    && prevPlayers.every((p, i) => nextPlayers[i]?.id === p.id && nextPlayers[i]?.connected === p.connected && nextPlayers[i]?.name === p.name);
+  if (!appendOnly) return false;
+  if (list.querySelector('.empty-players')) list.innerHTML = '';
+  for (let i = prevPlayers.length; i < nextPlayers.length; i++) {
+    const p = nextPlayers[i];
+    list.insertAdjacentHTML('beforeend', `<span class="player-chip"><i class="av a${i % 5}">${playerInitial(p.name)}</i><b>${safeText(p.name)}</b></span>`);
+  }
+  const totalEl = $('.player-total');
+  if (totalEl) totalEl.textContent = `${nextPlayers.length} player${nextPlayers.length === 1 ? '' : 's'} in the room`;
+  const startBtn = $('#start');
+  if (startBtn) startBtn.disabled = nextPlayers.length === 0;
+  const hintEl = $('.hint');
+  if (hintEl) hintEl.textContent = nextPlayers.length ? 'Everyone is ready. Let’s go!' : 'Waiting for your first player…';
+  return true;
+}
+
 socket.on('connect', resumeSession);
-socket.on('game:update', game => { setGame(game); render(); });
+socket.on('game:update', game => {
+  const previous = state.game;
+  setGame(game);
+  if (patchLiveUpdate(previous, game)) return;
+  render();
+});
 socket.on('reaction:new', reaction => {
   state.reactions.push(reaction);
   state.reactions = state.reactions.slice(-6);
-  render();
+  // Patch just the reaction feed instead of a full render() — this fires
+  // often during live play and a full re-render would tear down and replay
+  // the entrance animation on the entire answer grid every single time.
+  const feed = $('.reaction-feed');
+  if (feed) {
+    feed.insertAdjacentHTML('beforeend', reactionPopHtml(reaction));
+    while (feed.children.length > 6) feed.firstElementChild.remove();
+  }
   setTimeout(() => {
     state.reactions = state.reactions.filter(item => item.id !== reaction.id);
-    if (state.game?.phase === 'question') render();
+    document.querySelector(`.reaction-pop[data-reaction-id="${reaction.id}"]`)?.remove();
   }, 2600);
 });
 socket.on('game:ended', () => { clearInterval(timerInterval); clearSessions(); state.view = 'home'; state.game = null; state.player = null; state.created = false; state.hostToken = null; render(); });
@@ -213,7 +272,7 @@ function durationPicker() { return `<div class="duration-picker"><span>Time per 
 function host() {
   const g = state.game, q = g.question, count = g.answerCount;
   if (g.phase === 'lobby') { const link = `${location.origin}/?pin=${g.code}`; return `<main class="room host-room"><header>${logo()}<span class="status"><i></i> LIVE ROOM</span></header><section class="lobby"><div class="eyebrow">${safeText(g.title).toUpperCase()}</div><div class="pin-label">GAME PIN</div><div class="big-pin">${g.code}</div><p>Share the room link or have players enter the PIN.</p><div class="join-methods"><button class="share-link" id="copy-link" data-link="${link}"><span>↗</span><b>${link.replace(/^https?:\/\//, '')}</b><em>Copy link</em></button><canvas id="join-qr" class="join-qr" aria-label="QR code that opens the join link"></canvas></div><div class="people player-list">${g.players.length ? g.players.map((p,i)=>`<span class="player-chip"><i class="av a${i % 5}">${playerInitial(p.name)}</i><b>${safeText(p.name)}</b></span>`).join('') : '<span class="empty-players">Waiting for players to join…</span>'}</div><b class="player-total">${g.players.length} player${g.players.length === 1 ? '' : 's'} in the room</b>${durationPicker()}<button class="primary massive" id="start" ${g.players.length ? '' : 'disabled'}>Start the game <span>→</span></button><small class="hint">${g.players.length ? 'Everyone is ready. Let’s go!' : 'Waiting for your first player…'}</small></section></main>`; }
-  if (g.phase === 'question') return `<main class="room host-room"><header>${logo()}<span class="round">QUESTION ${g.questionIndex + 1} / ${g.questionCount}</span></header><section class="host-question"><div class="q-meta"><span class="q-pill">${q.level.toUpperCase()} · ${safeText(g.title).toUpperCase()}</span><span class="answer-progress"><b>${count}</b> / ${g.players.length} ANSWERED <em>· ${Math.max(0, g.players.length - count)} ANSWERING</em></span></div><h2>${safeText(q.question)}</h2>${q.image ? `<img class="question-image" src="${q.image}" alt="Visual cue for the question">` : ''}<div class="answer-grid mini">${q.answers.map((a,i)=>`<div class="answer ${q.colors[i]}"><b>${icons[i]}</b>${safeText(a)}</div>`).join('')}</div>${reactionShelf(false)}<button class="primary reveal" id="reveal">Reveal answers <span>→</span></button></section></main>`;
+  if (g.phase === 'question') return `<main class="room host-room"><header>${logo()}<span class="round">QUESTION ${g.questionIndex + 1} / ${g.questionCount}</span></header><section class="host-question"><div class="q-meta"><span class="q-pill">${q.level.toUpperCase()} · ${safeText(g.title).toUpperCase()}</span><span class="answer-progress"><b class="answered-count">${count}</b> / <span class="total-count">${g.players.length}</span> ANSWERED <em class="answering-left">· ${Math.max(0, g.players.length - count)} ANSWERING</em></span></div><h2>${safeText(q.question)}</h2>${q.image ? `<img class="question-image" src="${q.image}" alt="Visual cue for the question">` : ''}<div class="answer-grid mini">${q.answers.map((a,i)=>`<div class="answer ${q.colors[i]}"><b>${icons[i]}</b>${safeText(a)}</div>`).join('')}</div>${reactionShelf(false)}<button class="primary reveal" id="reveal">Reveal answers <span>→</span></button></section></main>`;
   return results(true);
 }
 function playerLobby() { return `<main class="room player-room"><header>${logo()}<span class="status"><i></i> CONNECTED</span></header><section class="waiting">${hostWarning(state.game)}<div class="waiting-icon">✦</div><div class="eyebrow">YOU’RE IN!</div><h2>Hey, ${safeText(state.player.name)}.</h2><p>Get comfortable — the host will start the game any moment.</p><div class="game-chip"><span>${safeText(state.game.title)}</span><b>PIN ${state.game.code}</b></div><div class="pulse-row"><i></i><i></i><i></i></div></section></main>`; }
